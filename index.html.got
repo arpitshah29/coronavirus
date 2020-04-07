@@ -42,6 +42,9 @@
     h3.confirmed {
       color:rgba(163,32,32,0.7);
     }
+    h3.tested {
+         color:rgba(32,163,32,0.7);
+    }
     h4 {
         margin:0;
         font-weight:100;
@@ -54,6 +57,12 @@
     }
     h2 .confirmed {
         color:rgba(163,32,32,0.7);
+    }
+    h2 .tested {
+      color:rgba(32,163,32,0.7);
+    }
+    h2 .population {
+        color:#aaa;
     }
     .filters {
         padding:0.5rem 1rem;
@@ -166,8 +175,8 @@
 <body>
     <a name="top"></a>
     <header>
-    <h1><span id="chart_title">{{.series.Title}}</span> Coronavirus</h1>
-    <h2><span class="deaths">{{.series.Format .allTimeDeaths}} Deaths</span> &nbsp; <span class="confirmed">{{.series.Format .allTimeConfirmed}} Confirmed</span></h2>
+    <h1><span id="chart_title">{{.series.Title}}</span> Coronavirus Cases</h1>
+    <h2><span class="deaths">{{.series.Format .allTimeDeaths}} Deaths</span> &nbsp; <span class="confirmed">{{.series.Format .allTimeConfirmed}} Confirmed</span> {{ if gt .allTimeTested 0 }}&nbsp; <span class="tested">{{.series.Format .allTimeTested}} Tested</span>{{end}} &nbsp; <span class="population">Population {{.series.Format .series.Population}}</span></h2>
     </header>
     
     <article>
@@ -196,29 +205,29 @@
     </form>
 
     <a name="deaths_daily"></a>
-    <h3 class="deaths">{{.series.Format .series.DeathsToday }} Deaths reported in last {{.series.LastHours}} hours</h3>
-    <h4>{{.series.Format .series.AverageDeaths}} Deaths 5 day average</h4>
+    <h3 class="deaths">{{.series.Format .series.DeathsToday }} deaths reported in last {{.series.LastHours}} hours</h3>
+    <h4>{{.series.Format .series.AverageDeaths}} deaths 3 day average</h4>
     <div class="chart_container">
         <canvas class="chart" id="chartDailyDeaths" ></canvas>
     </div>
 
     <a name="deaths"></a>
-    <h3 class="deaths">{{.series.Format .series.TotalDeaths}} Deaths</h3>
-    <h4>in {{.series.Count}} days, 2x in {{.series.DoubleDeathDays}} days</h4>
+    <h3 class="deaths">{{.series.Format .series.TotalDeaths}} deaths in {{.series.Count}} days</h3>
+    <h4>2x in {{.series.DoubleDeathDays}} days</h4>
     <div class="chart_container">
         <canvas class="chart" id="chartDeaths" ></canvas>
     </div>
 
     <a name="confirmed_daily"></a>
-    <h3 class="confirmed">{{.series.Format .series.ConfirmedToday }} Confirmed in last {{.series.LastHours}} hours</h3>
-    <h4>{{.series.Format .series.AverageConfirmed}} Cases 5 day average</h4>
+    <h3 class="confirmed">{{.series.Format .series.ConfirmedToday }} confirmed in last {{.series.LastHours}} hours</h3>
+    <h4>{{.series.Format .series.AverageConfirmed}} cases 3 day average</h4>
     <div class="chart_container">
         <canvas class="chart" id="chartDailyConfirmed" ></canvas>
     </div>
 
     <a name="confirmed"></a>
-    <h3 class="confirmed">{{.series.Format .series.TotalConfirmed}} Confirmed</h3>
-    <h4>in {{.series.Count}} days, 2x in {{.series.DoubleConfirmedDays}} days</h4>
+    <h3 class="confirmed">{{.series.Format .series.TotalConfirmed}} confirmed in {{.series.Count}} days</h3>
+    <h4>2x in {{.series.DoubleConfirmedDays}} days</h4>
     <div class="chart_container">
         <canvas class="chart" id="chartConfirmed" ></canvas>
     </div>
@@ -226,12 +235,34 @@
    
     {{ if gt (len .comparisons) 0 }}
         <a name="growth"></a>
-        <h3 class="confirmed">Growth Comparison</h3>
-        <h4>Growth in deaths from day of death {{.startDeaths}}</h4>
+        <h3 class="confirmed">Growth Comparison
+        {{ if eq .scale "linear" }}
+        <a href="{{.scaleURL}}" class="button">Linear</a> 
+        {{ else }}
+        <a href="{{.scaleURL}}" class="button">Log</a> 
+        {{ end }}
+        </h3>
+        <h4>Growth in deaths from day of death {{.startDeaths}}
+        </h4>
+
         <div class="chart_container larger">
             <canvas class="chart" id="chartComparisonDeaths" ></canvas>
         </div>
     {{ end }}
+
+
+     {{ if and false (gt (len .comparisons) 0) }}
+        <a name="growth"></a>
+        <h3 class="confirmed">New Deaths
+        </h3>
+        <h4>New deaths from day of death {{.startDeaths}}
+        </h4>
+
+        <div class="chart_container larger">
+            <canvas class="chart" id="chartComparisonNewDeaths" ></canvas>
+        </div>
+    {{ end }}
+
 
     {{ if not .series.UpdatedAt.IsZero }}
         <p class="updated_at">{{ .series.UpdatedAtDisplay}}</p>
@@ -290,14 +321,16 @@ var chartOptions = {
             }
          }],
          yAxes: [{
-           type: '{{.scale}}',
+           type: 'linear',
            position: "right",
            ticks: {
                 fontSize:fontSize*5,
                 autoSkip: true,
                 maxTicksLimit: 5,
                 callback: function(value, index, values) {
-                    if (value >= 1000) {
+                    if (value >= 1000000) {
+                        return value / 1000000 + 'm';
+                    } else if (value >= 1000) {
                         return value / 1000 + 'k';
                     }
                     return value;
@@ -455,35 +488,10 @@ var chartComparisonOptions = {
     maintainAspectRatio:false
 }
 
-var colorValues = [
-	[209, 17, 65],
-	[0, 177, 89],
-	[0, 174, 219],
-	[243, 119, 53],
-	[100, 85, 236],
-    [255, 40, 40],
-	[255, 193, 0],
-	[123, 179, 255],
-	[232, 106, 240],
-	[49, 150, 138],
-    [0, 255, 65],
-	[200, 200, 200],
-	[209, 57, 165],
-	[109, 17, 65],
-	[100, 177, 89],
-	[130, 174, 219],
-	[143, 119, 53],
-	[155, 40, 40],
-	[200, 85, 236],
-	[155, 193, 0],
-	[23, 179, 255],
-	[2, 106, 240],
-	[101, 223, 138],
-	[109, 57, 165]
-];
+{{ $firstSeries := (index .comparisons 0) }}
 
 var chartComparisonDeathsData = {
-      labels:{{ (index .comparisons 0).DaysFrom .startDeaths }},
+      labels:{{ $firstSeries.DaysFrom ($firstSeries.DeathsFrom .startDeaths) }},
       datasets:[
       {{ range $i,$s := .comparisons}}{{if not (eq $i 0) }},{{end}}{
             fill: false,
@@ -491,10 +499,10 @@ var chartComparisonDeathsData = {
             pointRadius: 3,
 			pointHoverRadius: 7,
             borderWidth: 1,
-            color:"rgb("+colorValues[{{$i}}]+")",
-            borderColor:"rgb("+colorValues[{{$i}}]+")",
-            backgroundColor:"rgb("+colorValues[{{$i}}]+")",
-            label: {{ .Description }},
+            color:"{{.Color}}",
+            borderColor:"{{.Color}}",
+            backgroundColor:"{{.Color}}",
+            label: {{ .Title }},
             data: {{ .DeathsFrom $.startDeaths }}
             }
        {{ end }}]
@@ -507,6 +515,8 @@ var chartComparisonDeaths = new Chart(chartComparisonDeathsCtx, {
     options: chartComparisonOptions,
     data: chartComparisonDeathsData
 });
+
+{{/* end comparisons */}}
 {{ end }}
 
 var filters = document.getElementsByClassName("filter-select")

@@ -12,8 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kennygrant/coronavirus/covid"
 	"golang.org/x/crypto/acme/autocert"
+
+	"github.com/kennygrant/coronavirus/series"
 )
 
 var development = false
@@ -30,23 +31,20 @@ func main() {
 	}
 
 	if development {
-		log.Printf("server: restarting in development mode")
+		log.Printf("server: starting in development mode")
 	} else {
-		log.Printf("server: restarting")
+		log.Printf("server: starting in production mode")
 	}
 
-	// Schedule a regular fetch of data at a specified time daily
-	covid.ScheduleDataFetch()
-
-	// Load the data first
-	err := covid.LoadData()
+	// Load our data
+	err := series.LoadData("./data")
 	if err != nil {
-		log.Fatalf("server: failed to load data:%s", err)
+		log.Fatalf("server: failed to load new data:%s", err)
 	}
-	// Fetch all data again on first load in production
-	// don't do this in dev normally
+
+	// Schedule a regular data update/reload - don't bother in development except when testing
 	if !development {
-		go covid.FetchData()
+		ScheduleUpdates()
 	}
 
 	// Load our template files into memory
@@ -55,6 +53,7 @@ func main() {
 	// Set up the https server with the handler attached to serve this data in a template
 	http.HandleFunc("/favicon.ico", handleFile)
 	http.HandleFunc("/", handleHome)
+	http.HandleFunc("/reload", handleReload)
 
 	// Start a server on port 443 (or another port if dev specified)
 	if development {
@@ -94,20 +93,26 @@ func handleHome(w http.ResponseWriter, r *http.Request) {
 	log.Printf("request:%s", r.URL)
 
 	// Get the parameters from the url
-	country, province, period := parseParams(r)
+	country, province, period, startDeaths := parseParams(r)
 
 	// Fetch the series concerned - if both are blank we'll get the global series
-	series, err := covid.FetchSeries(country, province)
+	s, err := series.FetchSeries(country, province)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
 
 	// Get the total counts first for the page
-	allTimeDeaths := series.TotalDeaths()
-	allTimeConfirmed := series.TotalConfirmed()
+	allTimeDeaths := s.TotalDeaths()
+	allTimeConfirmed := s.TotalConfirmed()
+	allTimeRecovered := s.TotalRecovered() // unreliable as yet
+	allTimeTested := s.TotalTested()
 
 	mobile := strings.Contains(strings.ToLower(r.UserAgent()), "mobile")
+
+	if startDeaths == 0 {
+		startDeaths = 5
+	}
 
 	// Use a default period depending on device if none selected
 	if period == 0 {
@@ -122,35 +127,51 @@ func handleHome(w http.ResponseWriter, r *http.Request) {
 
 	// Limit by period if applied
 	if period > 0 {
-		series = series.Days(period)
+		s = s.Period(period)
 	}
 
 	scale := "linear"
+	scaleURL := r.URL.Path + "?scale=log#growth"
 	if param(r, "scale") == "log" {
 		scale = "logarithmic"
+		scaleURL = r.URL.Path + "#growth"
 	}
 
-	// Compare growth rate of top 20 series
-	comparisons := covid.TopSeries(series.Country, 20)
+	// For global compare growth rate of top 20 series
+	var comparisons series.Slice
+	if s.IsGlobal() {
+		comparisons = series.TopSeries(country, 10)
+	} else if s.IsEuropean() {
+		comparisons = series.SelectedEuropeanSeries(country, 10)
+	} else if s.HasProvinces() {
+		log.Printf("home: comparing provinces for:%s", country)
+		comparisons = series.TopSeries(country, 10)
+	} else {
+		// Else fetch a selection of copmarative series (for example nearby countries)
+		comparisons = series.SelectedSeries(country, 10)
+	}
 
 	log.Printf("comparisons:%d", len(comparisons))
 
 	// Set up context with data
 	context := map[string]interface{}{
 		"period":           strconv.Itoa(period),
-		"country":          series.Key(series.Country),
-		"province":         series.Key(series.Province),
+		"country":          s.Key(s.Country),
+		"province":         s.Key(s.Province),
 		"comparisons":      comparisons,
-		"series":           series,
+		"series":           s,
 		"allTimeDeaths":    allTimeDeaths,
 		"allTimeConfirmed": allTimeConfirmed,
-		"periodOptions":    covid.PeriodOptions(),
-		"countryOptions":   covid.CountryOptions(),
-		"provinceOptions":  covid.ProvinceOptions(series.Country),
+		"allTimeRecovered": allTimeRecovered,
+		"allTimeTested":    allTimeTested,
+		"periodOptions":    series.PeriodOptions(),
+		"countryOptions":   series.CountryOptions(),
+		"provinceOptions":  series.ProvinceOptions(s.Country),
 		"jsonURL":          fmt.Sprintf("%s.json?period=%d", r.URL.Path, period),
 		"scale":            scale,
+		"scaleURL":         scaleURL,
 		"mobile":           mobile,
-		"startDeaths":      2, // Deaths to start comparison chart from
+		"startDeaths":      startDeaths, // Deaths to start comparison chart from
 	}
 
 	// If in development reload templates each time - no mutex as in dev only
@@ -177,6 +198,26 @@ func handleHome(w http.ResponseWriter, r *http.Request) {
 
 }
 
+// handleReload
+// FIXME - require authentication to avoid DOS
+func handleReload(w http.ResponseWriter, r *http.Request) {
+
+	log.Printf("reload:%s", r.URL)
+
+	err := series.LoadData("./data")
+
+	// Check for errors on reload
+	if err != nil {
+		log.Printf("reload error:%s", err)
+		http.Error(w, err.Error(), 500)
+	} else {
+		http.Redirect(w, r, "/", 302)
+	}
+
+	// Also reload today from online data
+	go updateFrequent()
+}
+
 // param returns one param string value
 func param(r *http.Request, key string) string {
 	queryParams := r.URL.Query()
@@ -188,7 +229,9 @@ func param(r *http.Request, key string) string {
 }
 
 // parseParams parses the parts of the url path (if any) and params
-func parseParams(r *http.Request) (country, province string, period int) {
+func parseParams(r *http.Request) (country, province string, period, startDeaths int) {
+
+	var err error
 
 	// Parse the path
 	p := r.URL.Path
@@ -208,14 +251,25 @@ func parseParams(r *http.Request) (country, province string, period int) {
 
 	// Add query string params from request  - accept all params this way
 	queryParams := r.URL.Query()
+
+	// Read period if any
 	if len(queryParams["period"]) > 0 {
-		var err error
-		periodString := queryParams["period"][0]
-		period, err = strconv.Atoi(periodString)
+		paramString := queryParams["period"][0]
+		period, err = strconv.Atoi(paramString)
 		if err != nil {
 			period = 0
 		}
 	}
+
+	// Read start deaths (to start charts at death n)
+	if len(queryParams["start_deaths"]) > 0 {
+		paramString := queryParams["start_deaths"][0]
+		startDeaths, err = strconv.Atoi(paramString)
+		if err != nil {
+			startDeaths = 0
+		}
+	}
+
 	if len(queryParams["country"]) > 0 {
 		country = queryParams["country"][0]
 	}
@@ -234,7 +288,7 @@ func parseParams(r *http.Request) (country, province string, period int) {
 		country = ""
 	}
 
-	return country, province, period
+	return country, province, period, startDeaths
 }
 
 // handleFile shows a file (if it exists)
